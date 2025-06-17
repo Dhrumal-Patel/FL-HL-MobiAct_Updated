@@ -213,7 +213,7 @@ def evaluate_global_model(server, loader, config, model_name='test'):
 
 if __name__ == "__main__":
     overlap_values = [0.0]
-    num_clients_values = [3]
+    num_clients_values = [44]
     verify_dataset(Config(overlap=0.0))
     
     for num_clients in num_clients_values:
