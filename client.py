@@ -14,9 +14,9 @@ class FederatedClient:
         self.config = config
         self.device = config.DEVICE
         self.models = {
-            'binary': LSTMModel(9, config.HIDDEN_SIZE_BINARY, config.NUM_LAYERS, 2).to(self.device),
-            'fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, config.NUM_LAYERS, len(config.FALL_SCENARIOS)).to(self.device),
-            'non_fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, config.NUM_LAYERS, len(config.NON_FALL_SCENARIOS)).to(self.device)
+            'binary': LSTMModel(9, config.HIDDEN_SIZE_BINARY, num_layers=config.NUM_LAYERS, num_classes=2).to(self.device),
+            'fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, num_layers=config.NUM_LAYERS, num_classes=len(config.FALL_SCENARIOS)).to(self.device),
+            'non_fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, num_layers=config.NUM_LAYERS, num_classes=len(config.NON_FALL_SCENARIOS)).to(self.device)
         }
         self.criterion = nn.CrossEntropyLoss()
 
@@ -30,6 +30,26 @@ class FederatedClient:
             )
 
     def train(self, model_path, algorithm, epochs):
+        # Validate train_data
+        if len(self.train_data) == 0:
+            print(f"Client {self.client_id}: Empty train_data, skipping training")
+            metrics = {
+                'binary_acc': 0.0, 'fall_acc': 0.0, 'non_fall_acc': 0.0,
+                'binary_weighted_acc': 0.0, 'fall_weighted_acc': 0.0, 'non_fall_weighted_acc': 0.0,
+                'binary_precision': 0.0, 'binary_recall': 0.0, 'binary_f1': 0.0,
+                'fall_precision': 0.0, 'fall_recall': 0.0, 'fall_f1': 0.0,
+                'non_fall_precision': 0.0, 'non_fall_recall': 0.0, 'non_fall_f1': 0.0
+            }
+            return metrics, 0, 0, 0
+
+        print(f"Client {self.client_id}: train_data size = {len(self.train_data)}")
+        # Debug: Inspect first sample
+        try:
+            inputs, targets = self.train_data[0]
+            print(f"Client {self.client_id}: Sample inputs shape = {inputs.shape}, targets shape = {targets.shape}")
+        except Exception as e:
+            print(f"Client {self.client_id}: Error accessing first sample: {e}")
+
         for model in self.models.values():
             model.train()
 
