@@ -64,8 +64,7 @@ class FederatedClient:
             batch_count = 0
             for inputs, targets in train_loader:
                 batch_count += 1
-                print(f"Client {self.client_id}: Batch {batch_count} inputs shape = {inputs.shape}, targets shape = {targets.shape}")
-                break  # Only log the first batch
+            print(f"Client {self.client_id}: DataLoader yielded {batch_count} batches")
             if batch_count == 0:
                 print(f"Client {self.client_id}: DataLoader yielded no batches")
                 metrics = {
@@ -92,6 +91,7 @@ class FederatedClient:
         non_fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.NON_FALL_SCENARIOS))}
 
         for epoch in range(epochs):
+            print(f"Client {self.client_id}: Starting epoch {epoch+1}/{epochs}")
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 binary_targets, multi_targets = targets[:, 0], targets[:, 1]
@@ -121,6 +121,7 @@ class FederatedClient:
                     non_fall_loss = self.criterion(non_fall_out, non_fall_targets[non_fall_mask])
                     non_fall_loss.backward()
                     optimizer_non_fall.step()
+            
 
         metrics = self.evaluate()
         total_samples = len(self.train_data)
