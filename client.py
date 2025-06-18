@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from model import LSTMModel
 from server import save_model_to_csv, load_model_from_csv
 from sklearn.metrics import precision_recall_fscore_support
+import os
 
 class FederatedClient:
     def __init__(self, client_id, train_data, test_data, config):
@@ -42,11 +43,11 @@ class FederatedClient:
             }
             return metrics, 0, 0, 0
 
-        print(f"Client {self.client_id}: train_data size = {len(self.train_data)}")
+        # print(f"Client {self.client_id}: train_data size = {len(self.train_data)}")
         # Debug: Inspect first sample
         try:
             inputs, targets = self.train_data[0]
-            print(f"Client {self.client_id}: Sample inputs shape = {inputs.shape}, targets shape = {targets.shape}")
+            # print(f"Client {self.client_id}: Sample inputs shape = {inputs.shape}, targets shape = {targets.shape}")
         except Exception as e:
             print(f"Client {self.client_id}: Error accessing first sample: {e}")
 
@@ -64,7 +65,7 @@ class FederatedClient:
             batch_count = 0
             for inputs, targets in train_loader:
                 batch_count += 1
-            print(f"Client {self.client_id}: DataLoader yielded {batch_count} batches")
+            # print(f"Client {self.client_id}: DataLoader yielded {batch_count} batches")
             if batch_count == 0:
                 print(f"Client {self.client_id}: DataLoader yielded no batches")
                 metrics = {
@@ -121,7 +122,7 @@ class FederatedClient:
                     non_fall_loss = self.criterion(non_fall_out, non_fall_targets[non_fall_mask])
                     non_fall_loss.backward()
                     optimizer_non_fall.step()
-            
+            # print(f"Client {self.client_id}: Completed epoch {epoch+1}/{epochs}")
 
         metrics = self.evaluate()
         total_samples = len(self.train_data)
@@ -130,12 +131,18 @@ class FederatedClient:
 
         print(f"Client {self.client_id}: Total samples={total_samples}, Fall samples={fall_samples}, Non-Fall samples={non_fall_samples}")
 
+        # Ensure model directory exists
+        os.makedirs(model_path, exist_ok=True)
         for model_name in self.models:
-            save_model_to_csv(
-                self.models[model_name],
-                f"{model_path}/client_{self.client_id}_{model_name}_params.csv",
-                self.config
-            )
+            try:
+                save_model_to_csv(
+                    self.models[model_name],
+                    f"{model_path}/client_{self.client_id}_{model_name}_params.csv",
+                    self.config
+                )
+                # print(f"Client {self.client_id}: Model saved to {model_path}/client_{self.client_id}_{model_name}_params.csv")
+            except Exception as e:
+                print(f"Client {self.client_id}: Error saving model {model_name}: {e}")
 
         return metrics, total_samples, fall_samples, non_fall_samples
 
