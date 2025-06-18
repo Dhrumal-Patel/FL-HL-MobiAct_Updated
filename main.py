@@ -51,7 +51,6 @@ def evaluate_global_model(server, loader, config, model_name='test'):
             config.DEVICE,
             config
         )
-        # Debug: Print model norm
         norm = compute_model_norm(global_model[model_name_key])
         print(f"[Debug] {model_name_key} model norm after loading: {norm:.4f}")
     
@@ -126,7 +125,6 @@ def evaluate_global_model(server, loader, config, model_name='test'):
             
             metrics['three_models']['total'] += len(targets)
     
-    # Compute three-model metrics
     if metrics['three_models']['binary_class_counts']:
         binary_weights = np.array([metrics['three_models']['binary_class_counts'].get(i, 0) for i in range(2)])
         binary_weights = binary_weights / binary_weights.sum() if binary_weights.sum() > 0 else np.ones(2) / 2
@@ -197,17 +195,36 @@ def evaluate_global_model(server, loader, config, model_name='test'):
         metrics['three_models']['non_fall_recall'] = 0.0
         metrics['three_models']['non_fall_f1'] = 0.0
     
-    # Compute two-model metrics
+    total_scenarios = len(config.FALL_SCENARIOS) + len(config.NON_FALL_SCENARIOS)
+    fall_weight = len(config.FALL_SCENARIOS) / total_scenarios
+    non_fall_weight = len(config.NON_FALL_SCENARIOS) / total_scenarios
+    
     metrics['two_models']['binary_acc'] = metrics['three_models']['binary_acc']
     metrics['two_models']['binary_weighted_acc'] = metrics['three_models']['binary_weighted_acc']
     metrics['two_models']['binary_precision'] = metrics['three_models']['binary_precision']
     metrics['two_models']['binary_recall'] = metrics['three_models']['binary_recall']
     metrics['two_models']['binary_f1'] = metrics['three_models']['binary_f1']
-    metrics['two_models']['multiclass_acc'] = (metrics['three_models']['fall_acc'] + metrics['three_models']['non_fall_acc']) / 2
-    metrics['two_models']['multiclass_weighted_acc'] = (metrics['three_models']['fall_weighted_acc'] + metrics['three_models']['non_fall_weighted_acc']) / 2
-    metrics['two_models']['multiclass_precision'] = (metrics['three_models']['fall_precision'] + metrics['three_models']['non_fall_precision']) / 2
-    metrics['two_models']['multiclass_recall'] = (metrics['three_models']['fall_recall'] + metrics['three_models']['non_fall_recall']) / 2
-    metrics['two_models']['multiclass_f1'] = (metrics['three_models']['fall_f1'] + metrics['three_models']['non_fall_f1']) / 2
+    
+    metrics['two_models']['multiclass_acc'] = (
+        fall_weight * metrics['three_models']['fall_acc'] +
+        non_fall_weight * metrics['three_models']['non_fall_acc']
+    )
+    metrics['two_models']['multiclass_weighted_acc'] = (
+        fall_weight * metrics['three_models']['fall_weighted_acc'] +
+        non_fall_weight * metrics['three_models']['non_fall_weighted_acc']
+    )
+    metrics['two_models']['multiclass_precision'] = (
+        fall_weight * metrics['three_models']['fall_precision'] +
+        non_fall_weight * metrics['three_models']['non_fall_precision']
+    )
+    metrics['two_models']['multiclass_recall'] = (
+        fall_weight * metrics['three_models']['fall_recall'] +
+        non_fall_weight * metrics['three_models']['non_fall_recall']
+    )
+    metrics['two_models']['multiclass_f1'] = (
+        fall_weight * metrics['three_models']['fall_f1'] +
+        non_fall_weight * metrics['three_models']['non_fall_f1']
+    )
     
     return convert_keys_to_json_serializable(metrics)
 
@@ -223,7 +240,6 @@ if __name__ == "__main__":
             os.makedirs(config.SAVE_FOLDER, exist_ok=True)
             os.makedirs(config.MODEL_SAVE_FOLDER, exist_ok=True)
             
-            # Prepare data
             try:
                 client_datasets, val_dataset, test_dataset = prepare_federated_data(config)
                 print(f"Prepared {len(client_datasets)} client datasets, validation dataset, and test dataset.")
@@ -231,7 +247,7 @@ if __name__ == "__main__":
                 print(f"Error preparing datasets: {e}")
                 continue
             
-            for algorithm in ['fedavg', 'weighted_fedavg']:  # FedProx is commented out in original
+            for algorithm in ['fedavg', 'weighted_fedavg']:
                 print(f"\n=== Running {algorithm.upper()} with Overlap = {overlap}, Num Clients = {num_clients} ===")
                 server = FederatedServer(config)
                 val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False)
@@ -239,7 +255,6 @@ if __name__ == "__main__":
                 algorithm_folder = os.path.join(config.SAVE_FOLDER, algorithm)
                 os.makedirs(algorithm_folder, exist_ok=True)
                 
-                # Initialize global model for norm checking
                 global_model = {
                     'binary': LSTMModel(9, config.HIDDEN_SIZE_BINARY, config.NUM_LAYERS, 2).to(config.DEVICE),
                     'fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, config.NUM_LAYERS, len(config.FALL_SCENARIOS)).to(config.DEVICE),
@@ -248,7 +263,6 @@ if __name__ == "__main__":
                 
                 for round_num in range(config.COMMUNICATION_ROUNDS):
                     print(f"\n=== {algorithm.upper()} Round {round_num + 1}/{config.COMMUNICATION_ROUNDS} ===")
-                    # Debug: Check global model norm before round
                     for model_name_key in global_model:
                         load_model_from_csv(
                             global_model[model_name_key],
@@ -267,26 +281,31 @@ if __name__ == "__main__":
                         client_sample_counts = {}
                         results = []
                         
-                        # Train each client
                         for client_id, client_data in enumerate(batch_datasets):
                             print(f"Training client {client_id}")
                             try:
                                 client = FederatedClient(client_id, client_data, client_data, config)
-                                # Explicitly load global model
                                 client.load_global_model(config.MODEL_SAVE_FOLDER)
-                                metrics, num_samples = client.train(config.MODEL_SAVE_FOLDER, algorithm, config.CLIENT_EPOCHS)
+                                metrics, total_samples, fall_samples, non_fall_samples = client.train(
+                                    config.MODEL_SAVE_FOLDER, algorithm, config.CLIENT_EPOCHS
+                                )
                                 client_metrics[client_id] = convert_keys_to_json_serializable(metrics)
-                                client_sample_counts[client_id] = num_samples
+                                client_sample_counts[client_id] = {
+                                    'total': total_samples,
+                                    'fall': fall_samples,
+                                    'non_fall': non_fall_samples
+                                }
                                 results.append({
                                     'client_id': client_id,
-                                    'num_samples': num_samples,
+                                    'num_samples': total_samples,
+                                    'fall_samples': fall_samples,
+                                    'non_fall_samples': non_fall_samples,
                                     'metrics': metrics
                                 })
                             except Exception as e:
                                 print(f"Error training client {client_id}: {e}")
                                 continue
                         
-                        # Aggregate client models
                         if client_metrics:
                             try:
                                 server.aggregate(list(client_metrics.keys()), algorithm, client_sample_counts)
@@ -297,7 +316,6 @@ if __name__ == "__main__":
                             print("No valid client results for aggregation")
                             continue
                         
-                        # Debug: Check global model norm after aggregation
                         for model_name_key in global_model:
                             load_model_from_csv(
                                 global_model[model_name_key],
@@ -308,7 +326,6 @@ if __name__ == "__main__":
                             norm_after = compute_model_norm(global_model[model_name_key])
                             print(f"[Debug] Round {round_num + 1}, {model_name_key} norm after aggregation: {norm_after:.4f}")
                         
-                        # Compute average client metrics
                         avg_metrics = {
                             'three_models': {
                                 'binary_acc': 0.0,
@@ -342,6 +359,10 @@ if __name__ == "__main__":
                         }
                         num_clients_in_batch = len(client_metrics)
                         if num_clients_in_batch > 0:
+                            total_scenarios = len(config.FALL_SCENARIOS) + len(config.NON_FALL_SCENARIOS)
+                            fall_weight = len(config.FALL_SCENARIOS) / total_scenarios
+                            non_fall_weight = len(config.NON_FALL_SCENARIOS) / total_scenarios
+                            
                             for metrics in client_metrics.values():
                                 avg_metrics['three_models']['binary_acc'] += metrics['binary_acc']
                                 avg_metrics['three_models']['binary_weighted_acc'] += metrics['binary_weighted_acc']
@@ -363,17 +384,31 @@ if __name__ == "__main__":
                                 avg_metrics['two_models']['binary_precision'] += metrics['binary_precision']
                                 avg_metrics['two_models']['binary_recall'] += metrics['binary_recall']
                                 avg_metrics['two_models']['binary_f1'] += metrics['binary_f1']
-                                avg_metrics['two_models']['multiclass_acc'] += (metrics['fall_acc'] + metrics['non_fall_acc']) / 2
-                                avg_metrics['two_models']['multiclass_weighted_acc'] += (metrics['fall_weighted_acc'] + metrics['non_fall_weighted_acc']) / 2
-                                avg_metrics['two_models']['multiclass_precision'] += (metrics['fall_precision'] + metrics['non_fall_precision']) / 2
-                                avg_metrics['two_models']['multiclass_recall'] += (metrics['fall_recall'] + metrics['non_fall_recall']) / 2
-                                avg_metrics['two_models']['multiclass_f1'] += (metrics['fall_f1'] + metrics['non_fall_f1']) / 2
+                                avg_metrics['two_models']['multiclass_acc'] += (
+                                    fall_weight * metrics['fall_acc'] +
+                                    non_fall_weight * metrics['non_fall_acc']
+                                )
+                                avg_metrics['two_models']['multiclass_weighted_acc'] += (
+                                    fall_weight * metrics['fall_weighted_acc'] +
+                                    non_fall_weight * metrics['non_fall_weighted_acc']
+                                )
+                                avg_metrics['two_models']['multiclass_precision'] += (
+                                    fall_weight * metrics['fall_precision'] +
+                                    non_fall_weight * metrics['non_fall_precision']
+                                )
+                                avg_metrics['two_models']['multiclass_recall'] += (
+                                    fall_weight * metrics['fall_recall'] +
+                                    non_fall_weight * metrics['non_fall_recall']
+                                )
+                                avg_metrics['two_models']['multiclass_f1'] += (
+                                    fall_weight * metrics['fall_f1'] +
+                                    non_fall_weight * metrics['non_fall_f1']
+                                )
                             
                             for model_type in avg_metrics:
                                 for key in avg_metrics[model_type]:
                                     avg_metrics[model_type][key] /= num_clients_in_batch
                         
-                        # Print average client metrics
                         print(f"\nAverage Client Metrics (Three Models) - "
                               f"Binary: Acc={avg_metrics['three_models']['binary_acc']:.4f}, "
                               f"W-Acc={avg_metrics['three_models']['binary_weighted_acc']:.4f}, "
@@ -402,66 +437,64 @@ if __name__ == "__main__":
                               f"Rec={avg_metrics['two_models']['multiclass_recall']:.4f}, "
                               f"F1={avg_metrics['two_models']['multiclass_f1']:.4f}")
                         
-                        # Evaluate global model
                         val_metrics = evaluate_global_model(server, val_loader, config, model_name='validation')
                         print(f"\nGlobal Validation Metrics (Three Models) - "
-                              f"Binary: Acc={val_metrics['three_models']['binary_acc']:.4f}, "
-                              f"W-Acc={val_metrics['three_models']['binary_weighted_acc']:.4f}, "
-                              f"Prec={val_metrics['three_models']['binary_precision']:.4f}, "
-                              f"Rec={val_metrics['three_models']['binary_recall']:.4f}, "
-                              f"F1={val_metrics['three_models']['binary_f1']:.4f}, "
-                              f"Fall: Acc={val_metrics['three_models']['fall_acc']:.4f}, "
-                              f"W-Acc={val_metrics['three_models']['fall_weighted_acc']:.4f}, "
-                              f"Prec={val_metrics['three_models']['fall_precision']:.4f}, "
-                              f"Rec={val_metrics['three_models']['fall_recall']:.4f}, "
-                              f"F1={val_metrics['three_models']['fall_f1']:.4f}, "
-                              f"Non-Fall: Acc={val_metrics['three_models']['non_fall_acc']:.4f}, "
-                              f"W-Acc={val_metrics['three_models']['non_fall_weighted_acc']:.4f}, "
-                              f"Prec={val_metrics['three_models']['non_fall_precision']:.4f}, "
-                              f"Rec={val_metrics['three_models']['non_fall_recall']:.4f}, "
-                              f"F1={val_metrics['three_models']['non_fall_f1']:.4f}")
+                              f"Binary: Acc={val_metrics['three_models']['binary_acc']:.3f}, "
+                              f"W-Acc={val_metrics['three_models']['binary_weighted_acc']:.3f}, "
+                              f"Prec={val_metrics['three_models']['binary_precision']:.3f}, "
+                              f"Rec={val_metrics['three_models']['binary_recall']:.3f}, "
+                              f"F1={val_metrics['three_models']['binary_f1']:.3f}, "
+                              f"Fall: Acc={val_metrics['three_models']['fall_acc']:.3f}, "
+                              f"W-Acc={val_metrics['three_models']['fall_weighted_acc']:.3f}, "
+                              f"Prec={val_metrics['three_models']['fall_precision']:.3f}, "
+                              f"Rec={val_metrics['three_models']['fall_recall']:.3f}, "
+                              f"F1={val_metrics['three_models']['fall_f1']:.3f}, "
+                              f"Non-Fall: Acc={val_metrics['three_models']['non_fall_acc']:.3f}, "
+                              f"W-Acc={val_metrics['three_models']['non_fall_weighted_acc']:.3f}, "
+                              f"Prec={val_metrics['three_models']['non_fall_precision']:.3f}, "
+                              f"Rec={val_metrics['three_models']['non_fall_recall']:.3f}, "
+                              f"F1={val_metrics['three_models']['non_fall_f1']:.3f}")
                         print(f"Global Validation Metrics (Two Models) - "
-                              f"Binary: Acc={val_metrics['two_models']['binary_acc']:.4f}, "
-                              f"W-Acc={val_metrics['two_models']['binary_weighted_acc']:.4f}, "
-                              f"Prec={val_metrics['two_models']['binary_precision']:.4f}, "
-                              f"Rec={val_metrics['two_models']['binary_recall']:.4f}, "
-                              f"F1={val_metrics['two_models']['binary_f1']:.4f}, "
-                              f"Multiclass: Acc={val_metrics['two_models']['multiclass_acc']:.4f}, "
-                              f"W-Acc={val_metrics['two_models']['multiclass_weighted_acc']:.4f}, "
-                              f"Prec={val_metrics['two_models']['multiclass_precision']:.4f}, "
-                              f"Rec={val_metrics['two_models']['multiclass_recall']:.4f}, "
-                              f"F1={val_metrics['two_models']['multiclass_f1']:.4f}")
+                              f"Binary: Acc={val_metrics['two_models']['binary_acc']:.2f}, "
+                              f"W-Acc={val_metrics['two_models']['binary_weighted_acc']:.2f}, "
+                              f"Prec={val_metrics['two_models']['binary_precision']:.2f}, "
+                              f"Rec={val_metrics['two_models']['binary_recall']:.2f}, "
+                              f"F1={val_metrics['two_models']['binary_f1']:.2f}, "
+                              f"Multiclass: Acc={val_metrics['two_models']['multiclass_acc']:.3f}, "
+                              f"W-Acc={val_metrics['two_models']['multiclass_weighted_acc']:.3f}, "
+                              f"Prec={val_metrics['two_models']['multiclass_precision']:.3f}, "
+                              f"Rec={val_metrics['two_models']['multiclass_recall']:.3f}, "
+                              f"F1={val_metrics['two_models']['multiclass_f1']:.3f}")
                         
                         test_metrics = evaluate_global_model(server, test_loader, config, model_name='test')
                         print(f"\nGlobal Test Metrics (Three Models) - "
-                              f"Binary: Acc={test_metrics['three_models']['binary_acc']:.4f}, "
-                              f"W-Acc={test_metrics['three_models']['binary_weighted_acc']:.4f}, "
-                              f"Prec={test_metrics['three_models']['binary_precision']:.4f}, "
-                              f"Rec={test_metrics['three_models']['binary_recall']:.4f}, "
-                              f"F1={test_metrics['three_models']['binary_f1']:.4f}, "
-                              f"Fall: Acc={test_metrics['three_models']['fall_acc']:.4f}, "
-                              f"W-Acc={test_metrics['three_models']['fall_weighted_acc']:.4f}, "
-                              f"Prec={test_metrics['three_models']['fall_precision']:.4f}, "
-                              f"Rec={test_metrics['three_models']['fall_recall']:.4f}, "
-                              f"F1={test_metrics['three_models']['fall_f1']:.4f}, "
-                              f"Non-Fall: Acc={test_metrics['three_models']['non_fall_acc']:.4f}, "
-                              f"W-Acc={test_metrics['three_models']['non_fall_weighted_acc']:.4f}, "
-                              f"Prec={test_metrics['three_models']['non_fall_precision']:.4f}, "
-                              f"Rec={test_metrics['three_models']['non_fall_recall']:.4f}, "
-                              f"F1={test_metrics['three_models']['non_fall_f1']:.4f}")
+                              f"Binary: Acc={test_metrics['three_models']['binary_acc']:.3f}, "
+                              f"W-Acc={test_metrics['three_models']['binary_weighted_acc']:.3f}, "
+                              f"Prec={test_metrics['three_models']['binary_precision']:.3f}, "
+                              f"Rec={test_metrics['three_models']['binary_recall']:.3f}, "
+                              f"F1={test_metrics['three_models']['binary_f1']:.3f}, "
+                              f"Fall: Acc={test_metrics['three_models']['fall_acc']:.3f}, "
+                              f"W-Acc={test_metrics['three_models']['fall_weighted_acc']:.3f}, "
+                              f"Prec={test_metrics['three_models']['fall_precision']:.3f}, "
+                              f"Rec={test_metrics['three_models']['fall_recall']:.3f}, "
+                              f"F1={test_metrics['three_models']['fall_f1']:.3f}, "
+                              f"Non-Fall: Acc={test_metrics['three_models']['non_fall_acc']:.3f}, "
+                              f"W-Acc={test_metrics['three_models']['non_fall_weighted_acc']:.3f}, "
+                              f"Prec={test_metrics['three_models']['non_fall_precision']:.3f}, "
+                              f"Rec={test_metrics['three_models']['non_fall_recall']:.3f}, "
+                              f"F1={test_metrics['three_models']['non_fall_f1']:.3f}")
                         print(f"Global Test Metrics (Two Models) - "
-                              f"Binary: Acc={test_metrics['two_models']['binary_acc']:.4f}, "
-                              f"W-Acc={test_metrics['two_models']['binary_weighted_acc']:.4f}, "
-                              f"Prec={test_metrics['two_models']['binary_precision']:.4f}, "
-                              f"Rec={test_metrics['two_models']['binary_recall']:.4f}, "
-                              f"F1={test_metrics['two_models']['binary_f1']:.4f}, "
-                              f"Multiclass: Acc={test_metrics['two_models']['multiclass_acc']:.4f}, "
-                              f"W-Acc={test_metrics['two_models']['multiclass_weighted_acc']:.4f}, "
-                              f"Prec={test_metrics['two_models']['multiclass_precision']:.4f}, "
-                              f"Rec={test_metrics['two_models']['multiclass_recall']:.4f}, "
-                              f"F1={test_metrics['two_models']['multiclass_f1']:.4f}")
+                              f"Binary: Acc={test_metrics['two_models']['binary_acc']:.2f}, "
+                              f"W-Acc={test_metrics['two_models']['binary_weighted_acc']:.2f}, "
+                              f"Prec={test_metrics['two_models']['binary_precision']:.2f}, "
+                              f"Rec={test_metrics['two_models']['binary_recall']:.2f}, "
+                              f"F1={test_metrics['two_models']['binary_f1']:.2f}, "
+                              f"Multiclass: Acc={test_metrics['two_models']['multiclass_acc']:.3f}, "
+                              f"W-Acc={test_metrics['two_models']['multiclass_weighted_acc']:.3f}, "
+                              f"Prec={test_metrics['two_models']['multiclass_precision']:.3f}, "
+                              f"Rec={test_metrics['two_models']['multiclass_recall']:.3f}, "
+                              f"F1={test_metrics['two_models']['multiclass_f1']:.3f}")
                         
-                        # Save results
                         round_results = {
                             'round': round_num,
                             'client_metrics': client_metrics,
@@ -473,9 +506,8 @@ if __name__ == "__main__":
                         with open(os.path.join(algorithm_folder, f'round_{round_num}_results.json'), 'w') as f:
                             json.dump(round_results, f, indent=4, cls=NumpyEncoder)
                         
-                        # Save results to CSV
                         if results:
-                            keys = ['client_id', 'num_clients', 'num_samples']
+                            keys = ['client_id', 'num_clients', 'num_samples', 'fall_samples', 'non_fall_samples']
                             metric_keys = [
                                 'binary_acc', 'binary_weighted_acc', 'binary_precision', 'binary_recall', 'binary_f1',
                                 'fall_acc', 'fall_weighted_acc', 'fall_precision', 'fall_recall', 'fall_f1',
@@ -488,7 +520,9 @@ if __name__ == "__main__":
                                     row = {
                                         'client_id': result['client_id'],
                                         'num_clients': config.NUM_CLIENTS,
-                                        'num_samples': result['num_samples']
+                                        'num_samples': result['num_samples'],
+                                        'fall_samples': result['fall_samples'],
+                                        'non_fall_samples': result['non_fall_samples']
                                     }
                                     row.update({k: result['metrics'].get(k, 0.0) for k in metric_keys})
                                     writer.writerow(row)
