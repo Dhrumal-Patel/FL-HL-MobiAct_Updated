@@ -59,6 +59,34 @@ class FederatedClient:
 
         train_loader = DataLoader(self.train_data, batch_size=self.config.BATCH_SIZE, shuffle=True)
 
+        # Debug: Check DataLoader batches
+        try:
+            batch_count = 0
+            for inputs, targets in train_loader:
+                batch_count += 1
+                print(f"Client {self.client_id}: Batch {batch_count} inputs shape = {inputs.shape}, targets shape = {targets.shape}")
+                break  # Only log the first batch
+            if batch_count == 0:
+                print(f"Client {self.client_id}: DataLoader yielded no batches")
+                metrics = {
+                    'binary_acc': 0.0, 'fall_acc': 0.0, 'non_fall_acc': 0.0,
+                    'binary_weighted_acc': 0.0, 'fall_weighted_acc': 0.0, 'non_fall_weighted_acc': 0.0,
+                    'binary_precision': 0.0, 'binary_recall': 0.0, 'binary_f1': 0.0,
+                    'fall_precision': 0.0, 'fall_recall': 0.0, 'fall_f1': 0.0,
+                    'non_fall_precision': 0.0, 'non_fall_recall': 0.0, 'non_fall_f1': 0.0
+                }
+                return metrics, len(self.train_data), 0, 0
+        except Exception as e:
+            print(f"Client {self.client_id}: DataLoader iteration error: {e}")
+            metrics = {
+                'binary_acc': 0.0, 'fall_acc': 0.0, 'non_fall_acc': 0.0,
+                'binary_weighted_acc': 0.0, 'fall_weighted_acc': 0.0, 'non_fall_weighted_acc': 0.0,
+                'binary_precision': 0.0, 'binary_recall': 0.0, 'binary_f1': 0.0,
+                'fall_precision': 0.0, 'fall_recall': 0.0, 'fall_f1': 0.0,
+                'non_fall_precision': 0.0, 'non_fall_recall': 0.0, 'non_fall_f1': 0.0
+            }
+            return metrics, len(self.train_data), 0, 0
+
         # Create mapping for fall and non-fall scenarios to model indices
         fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.FALL_SCENARIOS))}
         non_fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.NON_FALL_SCENARIOS))}
@@ -119,7 +147,7 @@ class FederatedClient:
         total, fall_total, non_fall_total = 0, 0, 0
         binary_preds, binary_targets = [], []
         fall_preds, fall_targets = [], []
-        non_fall_preds, non_fall_targets = []
+        non_fall_preds, non_fall_targets = [], []
         binary_class_counts = {}
         fall_class_counts = {}
         non_fall_class_counts = {}
