@@ -1,198 +1,216 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import numpy as np
+from torch.utils.data import DataLoader
 from model import LSTMModel
-from server import save_model_to_csv
+from server import save_model_to_csv, load_model_from_csv
 from sklearn.metrics import precision_recall_fscore_support
 
 class FederatedClient:
-    def __init__(self, client_id, train_dataset, val_dataset, config):
+    def __init__(self, client_id, train_data, test_data, config):
         self.client_id = client_id
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
+        self.train_data = train_data
+        self.test_data = test_data
         self.config = config
         self.device = config.DEVICE
         self.models = {
-            'binary': LSTMModel(
-                input_size=9,
-                hidden_size=config.HIDDEN_SIZE_BINARY,
-                num_layers=config.NUM_LAYERS,
-                num_classes=2
-            ).to(self.device),
-            'fall': LSTMModel(
-                input_size=9,
-                hidden_size=config.HIDDEN_SIZE_MULTICLASS,
-                num_layers=config.NUM_LAYERS,
-                num_classes=len(config.FALL_SCENARIOS)
-            ).to(self.device),
-            'non_fall': LSTMModel(
-                input_size=9,
-                hidden_size=config.HIDDEN_SIZE_MULTICLASS,
-                num_layers=config.NUM_LAYERS,
-                num_classes=len(config.NON_FALL_SCENARIOS)
-            ).to(self.device)
+            'binary': LSTMModel(9, config.HIDDEN_SIZE_BINARY, config.NUM_LAYERS, 2).to(self.device),
+            'fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, config.NUM_LAYERS, len(config.FALL_SCENARIOS)).to(self.device),
+            'non_fall': LSTMModel(9, config.HIDDEN_SIZE_MULTICLASS, config.NUM_LAYERS, len(config.NON_FALL_SCENARIOS)).to(self.device)
         }
-    
-    def load_global_model(self, model_save_folder):
-        from server import load_model_from_csv
+        self.criterion = nn.CrossEntropyLoss()
+
+    def load_global_model(self, model_path):
         for model_name in self.models:
-            model_path = f"{model_save_folder}/global_{model_name}_params.csv"
-            load_model_from_csv(self.models[model_name], model_path, self.device, self.config)
-    
-    def evaluate(self, loader, model_name='val'):
-        criterion = nn.CrossEntropyLoss()
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        preds = []
-        targets_list = []
-        class_counts = {}
-        
-        self.models[model_name].eval()
-        with torch.no_grad():
-            for inputs, targets in loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                if model_name == 'binary':
-                    target_col = 0
-                else:
-                    target_col = 1
-                
-                outputs = self.models[model_name](inputs).to(self.device)
-                loss = criterion(outputs, targets[:, target_col])
-                total_loss += loss.item()
-                
-                _, predicted = torch.max(outputs, 1)
-                correct += (predicted == targets[:, target_col]).sum().item()
-                total += len(targets)
-                preds.extend(predicted.tolist())
-                targets_list.extend(targets[:, target_col].tolist())
-                
-                for target in targets[:, target_col].cpu().numpy():
-                    class_counts[int(target)] = class_counts.get(int(target), 0) + 1
-        
-        accuracy = correct / max(1, total)
-        weighted_acc = 0.0
-        if class_counts:
-            weights = np.array([class_counts.get(i, 0) for i in range(max(class_counts.keys()) + 1)])
-            weights = weights / weights.sum() if weights.sum() > 0 else np.ones(len(weights)) / len(weights)
-            for i in range(len(weights)):
-                correct_count = sum(1 for pred, target in zip(preds, targets_list) if pred == target == i)
-                weighted_acc += correct_count * weights[i]
-            weighted_acc /= max(1, total)
-        
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            targets_list, preds, average='weighted', zero_division=0
-        )
-        
-        return {
-            'loss': total_loss / max(1, len(loader)),
-            'accuracy': accuracy,
-            'weighted_accuracy': weighted_acc,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
-        }
-    
-    def train(self, model_save_folder, algorithm, epochs):
-        train_loader = DataLoader(self.train_dataset, batch_size=self.config.BATCH_SIZE, shuffle=True)
-        criterion = nn.CrossEntropyLoss()
-        optimizers = {
-            'binary': torch.optim.Adam(self.models['binary'].parameters(), lr=self.config.LEARNING_RATE),
-            'fall': torch.optim.Adam(self.models['fall'].parameters(), lr=self.config.LEARNING_RATE),
-            'non_fall': torch.optim.Adam(self.models['non_fall'].parameters(), lr=self.config.LEARNING_RATE)
-        }
-        
-        # Count fall and non-fall samples
-        fall_samples = 0
-        non_fall_samples = 0
-        for _, targets in train_loader:
-            binary_targets = targets[:, 0].cpu().numpy()
-            fall_samples += np.sum(binary_targets == 0)
-            non_fall_samples += np.sum(binary_targets == 1)
-        
-        total_samples = len(self.train_dataset)
-        print(f"Client {self.client_id}: Total samples={total_samples}, Fall samples={fall_samples}, Non-Fall samples={non_fall_samples}")
-        
-        metrics = {
-            'binary_loss': 0.0, 'binary_acc': 0.0, 'binary_weighted_acc': 0.0,
-            'binary_precision': 0.0, 'binary_recall': 0.0, 'binary_f1': 0.0,
-            'fall_loss': 0.0, 'fall_acc': 0.0, 'fall_weighted_acc': 0.0,
-            'fall_precision': 0.0, 'fall_recall': 0.0, 'fall_f1': 0.0,
-            'non_fall_loss': 0.0, 'non_fall_acc': 0.0, 'non_fall_weighted_acc': 0.0,
-            'non_fall_precision': 0.0, 'non_fall_recall': 0.0, 'non_fall_f1': 0.0
-        }
-        
-        for model_name in self.models:
-            self.models[model_name].train()
-        
+            load_model_from_csv(
+                self.models[model_name],
+                f"{model_path}/global_{model_name}_params.csv",
+                self.device,
+                self.config
+            )
+
+    def train(self, model_path, algorithm, epochs):
+        for model in self.models.values():
+            model.train()
+
+        optimizer_binary = torch.optim.Adam(self.models['binary'].parameters(), lr=self.config.LEARNING_RATE)
+        optimizer_fall = torch.optim.Adam(self.models['fall'].parameters(), lr=self.config.LEARNING_RATE)
+        optimizer_non_fall = torch.optim.Adam(self.models['non_fall'].parameters(), lr=self.config.LEARNING_RATE)
+
+        train_loader = DataLoader(self.train_data, batch_size=self.config.BATCH_SIZE, shuffle=True)
+
+        # Create mapping for fall and non-fall scenarios to model indices
+        fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.FALL_SCENARIOS))}
+        non_fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.NON_FALL_SCENARIOS))}
+
         for epoch in range(epochs):
-            total_loss = {'binary': 0.0, 'fall': 0.0, 'non_fall': 0.0}
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 binary_targets, multi_targets = targets[:, 0], targets[:, 1]
-                
-                # Binary model
-                optimizers['binary'].zero_grad()
-                binary_out = self.models['binary'](inputs).to(self.device)
-                binary_loss = criterion(binary_out, binary_targets)
-                total_loss['binary'] += binary_loss.item()
+
+                # Map multi_targets to fall and non-fall indices
+                fall_targets = torch.tensor([fall_scenario_map.get(t.item(), 0) for t in multi_targets], dtype=torch.long).to(self.device)
+                non_fall_targets = torch.tensor([non_fall_scenario_map.get(t.item(), 0) for t in multi_targets], dtype=torch.long).to(self.device)
+
+                optimizer_binary.zero_grad()
+                binary_out = self.models['binary'](inputs)
+                binary_loss = self.criterion(binary_out, binary_targets)
                 binary_loss.backward()
-                optimizers['binary'].step()
-                
-                # Fall model
+                optimizer_binary.step()
+
                 fall_mask = binary_targets == 0
                 if fall_mask.any():
-                    optimizers['fall'].zero_grad()
-                    fall_out = self.models['fall'](inputs[fall_mask]).to(self.device)
-                    fall_loss = criterion(fall_out, multi_targets[fall_mask])
-                    total_loss['fall'] += fall_loss.item()
+                    optimizer_fall.zero_grad()
+                    fall_out = self.models['fall'](inputs[fall_mask])
+                    fall_loss = self.criterion(fall_out, fall_targets[fall_mask])
                     fall_loss.backward()
-                    optimizers['fall'].step()
-                
-                # Non-fall model
+                    optimizer_fall.step()
+
                 non_fall_mask = binary_targets == 1
                 if non_fall_mask.any():
-                    optimizers['non_fall'].zero_grad()
-                    non_fall_out = self.models['non_fall'](inputs[non_fall_mask]).to(self.device)
-                    non_fall_loss = criterion(non_fall_out, multi_targets[non_fall_mask])
-                    total_loss['non_fall'] += non_fall_loss.item()
+                    optimizer_non_fall.zero_grad()
+                    non_fall_out = self.models['non_fall'](inputs[non_fall_mask])
+                    non_fall_loss = self.criterion(non_fall_out, non_fall_targets[non_fall_mask])
                     non_fall_loss.backward()
-                    optimizers['non_fall'].step()
-            
-            # Evaluate after each epoch
-            train_metrics = self.evaluate(train_loader, 'binary')
-            metrics['binary_loss'] = total_loss['binary'] / len(train_loader)
-            metrics['binary_acc'] = train_metrics['accuracy']
-            metrics['binary_weighted_acc'] = train_metrics['weighted_accuracy']
-            metrics['binary_precision'] = train_metrics['precision']
-            metrics['binary_recall'] = train_metrics['recall']
-            metrics['binary_f1'] = train_metrics['f1']
-            
-            if fall_samples > 0:
-                train_metrics = self.evaluate(train_loader, 'fall')
-                metrics['fall_loss'] = total_loss['fall'] / max(1, sum(binary_targets == 0 for _, targets in train_loader))
-                metrics['fall_acc'] = train_metrics['accuracy']
-                metrics['fall_weighted_acc'] = train_metrics['weighted_accuracy']
-                metrics['fall_precision'] = train_metrics['precision']
-                metrics['fall_recall'] = train_metrics['recall']
-                metrics['fall_f1'] = train_metrics['f1']
-            
-            if non_fall_samples > 0:
-                train_metrics = self.evaluate(train_loader, 'non_fall')
-                metrics['non_fall_loss'] = total_loss['non_fall'] / max(1, sum(binary_targets == 1 for _, targets in train_loader))
-                metrics['non_fall_acc'] = train_metrics['accuracy']
-                metrics['non_fall_weighted_acc'] = train_metrics['weighted_accuracy']
-                metrics['non_fall_precision'] = train_metrics['precision']
-                metrics['non_fall_recall'] = train_metrics['recall']
-                metrics['non_fall_f1'] = train_metrics['f1']
-        
-        # Save models
+                    optimizer_non_fall.step()
+
+        metrics = self.evaluate()
+        total_samples = len(self.train_data)
+        fall_samples = sum(1 for _, target in self.train_data if target[0] == 0)
+        non_fall_samples = total_samples - fall_samples
+
+        print(f"Client {self.client_id}: Total samples={total_samples}, Fall samples={fall_samples}, Non-Fall samples={non_fall_samples}")
+
         for model_name in self.models:
             save_model_to_csv(
                 self.models[model_name],
-                f"{model_save_folder}/client_{self.client_id}/{model_name}_params.csv",
+                f"{model_path}/client_{self.client_id}_{model_name}_params.csv",
                 self.config
             )
-        
+
         return metrics, total_samples, fall_samples, non_fall_samples
+
+    def evaluate(self):
+        for model in self.models.values():
+            model.eval()
+
+        test_loader = DataLoader(self.test_data, batch_size=self.config.BATCH_SIZE, shuffle=False)
+        binary_correct, fall_correct, non_fall_correct = 0, 0, 0
+        total, fall_total, non_fall_total = 0, 0, 0
+        binary_preds, binary_targets = [], []
+        fall_preds, fall_targets = [], []
+        non_fall_preds, non_fall_targets = []
+        binary_class_counts = {}
+        fall_class_counts = {}
+        non_fall_class_counts = {}
+
+        # Create mapping for fall and non-fall scenarios to model indices
+        fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.FALL_SCENARIOS))}
+        non_fall_scenario_map = {scenario: idx for idx, scenario in enumerate(sorted(self.config.NON_FALL_SCENARIOS))}
+
+        with torch.no_grad():
+            for inputs, targets in test_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                binary_targets_batch, multi_targets_batch = targets[:, 0], targets[:, 1]
+
+                # Map multi_targets to fall and non-fall indices
+                fall_targets_batch = torch.tensor([fall_scenario_map.get(t.item(), 0) for t in multi_targets_batch], dtype=torch.long).to(self.device)
+                non_fall_targets_batch = torch.tensor([non_fall_scenario_map.get(t.item(), 0) for t in multi_targets_batch], dtype=torch.long).to(self.device)
+
+                binary_out = self.models['binary'](inputs)
+                _, binary_pred = torch.max(binary_out, 1)
+                binary_correct += (binary_pred == binary_targets_batch).sum().item()
+                binary_preds.extend(binary_pred.tolist())
+                binary_targets.extend(binary_targets_batch.tolist())
+
+                for target in binary_targets_batch.cpu().numpy():
+                    binary_class_counts[int(target)] = binary_class_counts.get(int(target), 0) + 1
+
+                fall_mask = binary_targets_batch == 0
+                if fall_mask.any():
+                    fall_out = self.models['fall'](inputs[fall_mask])
+                    _, fall_pred = torch.max(fall_out, 1)
+                    fall_correct += (fall_pred == fall_targets_batch[fall_mask]).sum().item()
+                    fall_total += fall_mask.sum().item()
+                    fall_preds.extend(fall_pred.tolist())
+                    fall_targets.extend(fall_targets_batch[fall_mask].tolist())
+                    for target in fall_targets_batch[fall_mask].cpu().numpy():
+                        fall_class_counts[int(target)] = fall_class_counts.get(int(target), 0) + 1
+
+                non_fall_mask = binary_targets_batch == 1
+                if non_fall_mask.any():
+                    non_fall_out = self.models['non_fall'](inputs[non_fall_mask])
+                    _, non_fall_pred = torch.max(non_fall_out, 1)
+                    non_fall_correct += (non_fall_pred == non_fall_targets_batch[non_fall_mask]).sum().item()
+                    non_fall_total += non_fall_mask.sum().item()
+                    non_fall_preds.extend(non_fall_pred.tolist())
+                    non_fall_targets.extend(non_fall_targets_batch[non_fall_mask].tolist())
+                    for target in non_fall_targets_batch[non_fall_mask].cpu().numpy():
+                        non_fall_class_counts[int(target)] = non_fall_class_counts.get(int(target), 0) + 1
+
+                total += len(targets)
+
+        metrics = {
+            'binary_acc': binary_correct / max(1, total),
+            'fall_acc': fall_correct / max(1, fall_total),
+            'non_fall_acc': non_fall_correct / max(1, non_fall_total),
+            'binary_weighted_acc': 0.0,
+            'fall_weighted_acc': 0.0,
+            'non_fall_weighted_acc': 0.0,
+            'binary_precision': 0.0,
+            'binary_recall': 0.0,
+            'binary_f1': 0.0,
+            'fall_precision': 0.0,
+            'fall_recall': 0.0,
+            'fall_f1': 0.0,
+            'non_fall_precision': 0.0,
+            'non_fall_recall': 0.0,
+            'non_fall_f1': 0.0
+        }
+
+        if binary_class_counts:
+            binary_weights = np.array([binary_class_counts.get(i, 0) for i in range(2)])
+            binary_weights = binary_weights / binary_weights.sum() if binary_weights.sum() > 0 else np.ones(2) / 2
+            binary_correct_weighted = 0
+            for i in range(2):
+                correct_count = sum(1 for pred, target in zip(binary_preds, binary_targets) if pred == target == i)
+                binary_correct_weighted += correct_count * binary_weights[i]
+            metrics['binary_weighted_acc'] = binary_correct_weighted / max(1, total)
+
+        if fall_class_counts:
+            fall_weights = np.array([fall_class_counts.get(i, 0) for i in range(len(self.config.FALL_SCENARIOS))])
+            fall_weights = fall_weights / fall_weights.sum() if fall_weights.sum() > 0 else np.ones(len(self.config.FALL_SCENARIOS)) / len(self.config.FALL_SCENARIOS)
+            fall_correct_weighted = 0
+            for i in range(len(self.config.FALL_SCENARIOS)):
+                correct_count = sum(1 for pred, target in zip(fall_preds, fall_targets) if pred == target == i)
+                fall_correct_weighted += correct_count * fall_weights[i]
+            metrics['fall_weighted_acc'] = fall_correct_weighted / max(1, fall_total)
+
+        if non_fall_class_counts:
+            non_fall_weights = np.array([non_fall_class_counts.get(i, 0) for i in range(len(self.config.NON_FALL_SCENARIOS))])
+            non_fall_weights = non_fall_weights / non_fall_weights.sum() if non_fall_weights.sum() > 0 else np.ones(len(self.config.NON_FALL_SCENARIOS)) / len(self.config.NON_FALL_SCENARIOS)
+            non_fall_correct_weighted = 0
+            for i in range(len(self.config.NON_FALL_SCENARIOS)):
+                correct_count = sum(1 for pred, target in zip(non_fall_preds, non_fall_targets) if pred == target == i)
+                non_fall_correct_weighted += correct_count * non_fall_weights[i]
+            metrics['non_fall_weighted_acc'] = non_fall_correct_weighted / max(1, non_fall_total)
+
+        if binary_targets:
+            binary_prf = precision_recall_fscore_support(binary_targets, binary_preds, average='weighted', zero_division=0)
+            metrics['binary_precision'] = binary_prf[0]
+            metrics['binary_recall'] = binary_prf[1]
+            metrics['binary_f1'] = binary_prf[2]
+
+        if fall_targets:
+            fall_prf = precision_recall_fscore_support(fall_targets, fall_preds, average='weighted', zero_division=0)
+            metrics['fall_precision'] = fall_prf[0]
+            metrics['fall_recall'] = fall_prf[1]
+            metrics['fall_f1'] = fall_prf[2]
+
+        if non_fall_targets:
+            non_fall_prf = precision_recall_fscore_support(non_fall_targets, non_fall_preds, average='weighted', zero_division=0)
+            metrics['non_fall_precision'] = non_fall_prf[0]
+            metrics['non_fall_recall'] = non_fall_prf[1]
+            metrics['non_fall_f1'] = non_fall_prf[2]
+
+        return metrics
