@@ -247,7 +247,7 @@ if __name__ == "__main__":
                 print(f"Error preparing datasets: {e}")
                 continue
             
-            for algorithm in ['fedavg', 'weighted_fedavg']:
+            for algorithm in ['weighted_fedavg']:
                 print(f"\n=== Running {algorithm.upper()} with Overlap = {overlap}, Num Clients = {num_clients} ===")
                 server = FederatedServer(config)
                 val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False)
