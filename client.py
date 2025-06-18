@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
-from model import LSTMModel, save_model_to_csv
+from model import LSTMModel
+from server import save_model_to_csv
 from sklearn.metrics import precision_recall_fscore_support
 
 class FederatedClient:
