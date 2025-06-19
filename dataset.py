@@ -191,8 +191,8 @@ def prepare_federated_data(config):
     df = pd.read_csv(config.DATA_FILE)
     excluded_subjects = [41, 24, 50]
     df = df[~df['subject'].isin(excluded_subjects)]
-    unique_users = df['subject'].unique()[:5]
-    df = df[df['subject'].isin(unique_users)]
+    # unique_users = df['subject'].unique()[:5]
+    # df = df[df['subject'].isin(unique_users)]
     all_subjects = df['subject'].unique()
     print(f"Total subjects: {len(all_subjects)}")
     
