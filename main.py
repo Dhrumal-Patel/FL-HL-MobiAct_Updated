@@ -214,7 +214,7 @@ def main():
     config = Config()
     algorithms = ['weighted_fedavg']
     overlaps = [0.0]
-    num_clients_list = [3]
+    num_clients_list = [44]
 
     for overlap in overlaps:
         for num_clients in num_clients_list:
