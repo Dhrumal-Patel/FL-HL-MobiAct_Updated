@@ -3,6 +3,8 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, random_split
 from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE
+from sklearn.neighbors import NearestNeighbors
 
 # Dataset Class
 class SensorDataset(Dataset):
@@ -27,6 +29,80 @@ def create_sequences(data, targets, seq_length, overlap):
         seq_targets.append(targets[i + seq_length - 1])
     
     return np.array(sequences), np.array(seq_targets)
+
+# Upsample fall scenarios per subject/trial
+def upsample_fall_scenarios(df, feature_columns, sampling_strategy=0.5, random_state=42):
+    smote = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state, k_neighbors=5)
+    group_cols = ['subject', 'trial'] if 'trial' in df.columns else ['subject']
+    upsampled_dfs = []
+    
+    for name, group in df.groupby(group_cols):
+        print(f"Upsampling group {name}: {len(group)} samples")
+        if len(group['class_encoded'].unique()) < 2:
+            print(f"Group {name} has only one class. Skipping upsampling.")
+            upsampled_dfs.append(group)
+            continue
+        
+        features = group[feature_columns].values
+        class_labels = group['class_encoded'].values
+        scenario_labels = group['scenario_encoded'].values
+        
+        if np.any(np.isnan(features)) or np.any(np.isinf(features)):
+            print(f"Warning: NaNs/infinities in group {name}. Replacing with zeros.")
+            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        try:
+            features_resampled, class_resampled = smote.fit_resample(features, class_labels)
+            print(f"Group {name} after upsampling: {len(features_resampled)} samples")
+            scenario_resampled = np.zeros(len(features_resampled), dtype=np.int64)
+            scenario_resampled[:len(features)] = scenario_labels
+            
+            if len(features_resampled) > len(features):
+                # Find nearest neighbors for synthetic samples
+                synthetic_features = features_resampled[len(features):]
+                synthetic_classes = class_resampled[len(features):]
+                
+                # For synthetic fall samples, use only original fall samples for nearest neighbor
+                fall_indices = np.where(class_labels == 0)[0]
+                if len(fall_indices) == 0:
+                    print(f"Warning: No original fall samples in group {name}. Using all samples for NN.")
+                    nn_features = features
+                    nn_scenarios = scenario_labels
+                else:
+                    nn_features = features[fall_indices]
+                    nn_scenarios = scenario_labels[fall_indices]
+                
+                nn = NearestNeighbors(n_neighbors=1).fit(nn_features)
+                distances, indices = nn.kneighbors(synthetic_features)
+                
+                # Assign scenario labels: fall scenarios for synthetic fall samples, original for others
+                for i, (synth_class, nn_idx) in enumerate(zip(synthetic_classes, indices.flatten())):
+                    if synth_class == 0:  # Synthetic fall sample
+                        scenario_resampled[len(features) + i] = nn_scenarios[nn_idx]
+                    else:  # Synthetic non-fall sample
+                        nn_all = NearestNeighbors(n_neighbors=1).fit(features)
+                        _, idx_all = nn_all.kneighbors(synthetic_features[i:i+1])
+                        scenario_resampled[len(features) + i] = scenario_labels[idx_all.flatten()[0]]
+            
+            group_resampled = pd.DataFrame(
+                features_resampled, columns=feature_columns
+            )
+            group_resampled['class_encoded'] = class_resampled
+            group_resampled['scenario_encoded'] = scenario_resampled
+            for col in group_cols:
+                group_resampled[col] = group[col].iloc[0]
+            
+            # Validate scenario_encoded
+            valid_scenarios = set(range(16))  # {0, 1, ..., 15}
+            group_scenarios = set(group_resampled['scenario_encoded'].unique())
+            if not group_scenarios.issubset(valid_scenarios):
+                raise ValueError(f"Invalid scenario_encoded in group {name}: {group_scenarios}")
+            upsampled_dfs.append(group_resampled)
+        except Exception as e:
+            print(f"Upsampling failed for group {name}: {e}. Using original group.")
+            upsampled_dfs.append(group)
+    
+    return pd.concat(upsampled_dfs, ignore_index=True)
 
 # Data Loading and Preparation
 def load_and_prepare_data(df, config, feature_min=None, feature_max=None):
@@ -115,8 +191,8 @@ def prepare_federated_data(config):
     df = pd.read_csv(config.DATA_FILE)
     excluded_subjects = [41, 24, 50]
     df = df[~df['subject'].isin(excluded_subjects)]
-    # unique_users = df['subject'].unique()[:5]
-    # df = df[df['subject'].isin(unique_users)]
+    unique_users = df['subject'].unique()[:5]
+    df = df[df['subject'].isin(unique_users)]
     all_subjects = df['subject'].unique()
     print(f"Total subjects: {len(all_subjects)}")
     
@@ -146,20 +222,40 @@ def prepare_federated_data(config):
     config.FEATURE_MAX = np.where(config.FEATURE_MAX == config.FEATURE_MIN, 
                                   config.FEATURE_MAX + 1e-10, config.FEATURE_MAX)
     
+    # Shuffle training subjects
     np.random.shuffle(train_subjects)
-    clients_subjects = np.array_split(train_subjects, config.NUM_CLIENTS)
+    
+    # Ensure number of clients does not exceed number of training subjects
+    num_clients = min(config.NUM_CLIENTS, len(train_subjects))
+    if num_clients == 0:
+        raise ValueError("No training subjects available for clients")
+    
+    # Split subjects among clients, ensuring no empty splits
+    clients_subjects = [split for split in np.array_split(train_subjects, num_clients) if len(split) > 0]
+    if not clients_subjects:
+        raise ValueError("No valid client subject assignments created")
+    
+    print(f"Assigned {len(clients_subjects)} clients with subjects: {[list(subjects) for subjects in clients_subjects]}")
     
     client_datasets = []
     for client_id, subjects in enumerate(clients_subjects):
         client_df = train_df[train_df['subject'].isin(subjects)]
         print(f"Client {client_id} assigned subjects: {subjects}")
-        features, targets = load_and_prepare_data(
-            client_df, config, config.FEATURE_MIN, config.FEATURE_MAX
-        )
-        if len(features) > 0:
-            client_datasets.append(SensorDataset(features, targets))
-        else:
-            print(f"Skipping client {client_id}: insufficient data")
+        try:
+            features, targets = load_and_prepare_data(
+                client_df, config, config.FEATURE_MIN, config.FEATURE_MAX
+            )
+            if len(features) > 0:
+                client_datasets.append(SensorDataset(features, targets))
+                print(f"Client {client_id} dataset created with {len(features)} samples")
+            else:
+                print(f"Skipping client {client_id}: insufficient data")
+        except ValueError as e:
+            print(f"Client {client_id} failed to create dataset: {e}")
+            continue
+    
+    if not client_datasets:
+        raise ValueError("No client datasets created")
     
     val_features, val_targets = load_and_prepare_data(
         val_df, config, config.FEATURE_MIN, config.FEATURE_MAX
