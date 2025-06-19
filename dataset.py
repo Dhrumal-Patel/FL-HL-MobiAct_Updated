@@ -144,7 +144,7 @@ def load_and_prepare_data(df, config, feature_min=None, feature_max=None):
                 features.append(group_seqs)
                 targets.append(group_seq_targets)
         else:
-            print(f"Skipping group {name}: too few samples ({len(group)} < {config.SEQUENCE_LENGTH})")
+            print(f"Warning: Skipping group {name} due to insufficient samples ({len(group)} < {config.SEQUENCE_LENGTH})")
     
     if not features:
         raise ValueError("No sequences created from the data")
@@ -191,8 +191,8 @@ def prepare_federated_data(config):
     df = pd.read_csv(config.DATA_FILE)
     excluded_subjects = [41, 24, 50]
     df = df[~df['subject'].isin(excluded_subjects)]
-    # unique_users = df['subject'].unique()[:5]
-    # df = df[df['subject'].isin(unique_users)]
+    unique_users = df['subject'].unique()
+    df = df[df['subject'].isin(unique_users)]
     all_subjects = df['subject'].unique()
     print(f"Total subjects: {len(all_subjects)}")
     
@@ -225,16 +225,9 @@ def prepare_federated_data(config):
     # Shuffle training subjects
     np.random.shuffle(train_subjects)
     
-    # Ensure number of clients does not exceed number of training subjects
-    num_clients = min(config.NUM_CLIENTS, len(train_subjects))
-    if num_clients == 0:
-        raise ValueError("No training subjects available for clients")
-    
-    # Split subjects among clients, ensuring no empty splits
-    clients_subjects = [split for split in np.array_split(train_subjects, num_clients) if len(split) > 0]
-    if not clients_subjects:
-        raise ValueError("No valid client subject assignments created")
-    
+    # Assign each training subject as an individual client
+    num_clients = len(train_subjects)
+    clients_subjects = [[subject] for subject in train_subjects]
     print(f"Assigned {len(clients_subjects)} clients with subjects: {[list(subjects) for subjects in clients_subjects]}")
     
     client_datasets = []
@@ -249,7 +242,7 @@ def prepare_federated_data(config):
                 client_datasets.append(SensorDataset(features, targets))
                 print(f"Client {client_id} dataset created with {len(features)} samples")
             else:
-                print(f"Skipping client {client_id}: insufficient data")
+                print(f"Warning: Skipping client {client_id} due to insufficient data")
         except ValueError as e:
             print(f"Client {client_id} failed to create dataset: {e}")
             continue
